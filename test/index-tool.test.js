@@ -1,35 +1,52 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile, realpath } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, realpath, symlink } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { validateIndexArguments } from '../src/index-tool.js';
 import { runCommand } from '../src/run-command.js';
-import { projectTools, readStatus, validateAffectedArguments, cycleCommandSucceeded } from '../src/project-tools.js';
+import { projectTools, validateAffectedArguments, cycleCommandSucceeded } from '../src/project-tools.js';
 
-test('index tool requires an exact indexed absolute directory', async () => {
+test('index tools require an explicit index directory and reject source paths or database files', async () => {
   await mkdir('.tmp', { recursive: true });
   const root = await mkdtemp(resolve('.tmp/index-validation-'));
-  await assert.rejects(validateIndexArguments({ projectPath: 'relative' }), /absolute/);
-  await assert.rejects(validateIndexArguments({ projectPath: root, force: true }), /no other/);
-  await assert.rejects(validateIndexArguments({ projectPath: root }), /no .codegraph/);
+  await assert.rejects(validateIndexArguments({ indexPath: 'relative' }), /absolute/);
+  await assert.rejects(validateIndexArguments({ projectPath: root }), /indexPath/);
+  await assert.rejects(validateIndexArguments({ indexPath: root, force: true }), /no other/);
+  await assert.rejects(validateIndexArguments({ indexPath: root }), /no codegraph.db/);
   await mkdir(join(root, '.codegraph')); await mkdir(join(root, 'subdir'));
-  assert.equal((await validateIndexArguments({ projectPath: root })).projectPath, await realpath(root));
-  await assert.rejects(validateIndexArguments({ projectPath: join(root, 'subdir') }), /no .codegraph/);
+  const indexPath = join(root, '.codegraph');
+  await writeFile(join(indexPath, 'codegraph.db'), 'fixture');
+  assert.deepEqual(await validateIndexArguments({ indexPath }), { projectPath: await realpath(root), indexPath: join(await realpath(root), '.codegraph') });
+  await assert.rejects(validateIndexArguments({ indexPath: join(root, 'subdir') }), /no codegraph.db/);
+  await assert.rejects(validateIndexArguments({ indexPath: join(indexPath, 'codegraph.db') }), /directory/);
 });
 
-test('init and status accept exact unindexed projects without using their parent index', async () => {
+test('init and status keep projectPath while existing-index operations expose indexPath', async () => {
   await mkdir('.tmp', { recursive: true });
   const root = await mkdtemp(resolve('.tmp/project-validation-'));
   await mkdir(join(root, '.codegraph')); await mkdir(join(root, 'child'));
   for (const name of ['codegraph_init', 'codegraph_status']) {
     const tool = projectTools.find(tool => tool.definition.name === name);
     const args = await tool.validate({ projectPath: join(root, 'child') });
-    assert.equal(args.indexed, false);
     assert.equal(args.projectPath, await realpath(join(root, 'child')));
+    assert.deepEqual(tool.definition.inputSchema.required, ['projectPath']);
     await assert.rejects(tool.validate({ projectPath: root, command: 'uninit' }), /no other/);
   }
-  const status = await readStatus({ projectPath: root, indexed: false });
-  assert.deepEqual(JSON.parse(status.content[0].text), { projectPath: root, initialized: false });
+  for (const name of ['codegraph_index', 'codegraph_sync', 'codegraph_affected', 'codegraph_cycles']) {
+    const schema = projectTools.find(tool => tool.definition.name === name).definition.inputSchema;
+    assert.ok(schema.required.includes('indexPath'));
+    assert.equal(schema.properties.projectPath, undefined);
+  }
+});
+
+test('index directory junctions preserve the logical source parent', async () => {
+  const root = await mkdtemp(resolve('.tmp/index-junction-'));
+  const storage = await mkdtemp(resolve('.tmp/index-storage-'));
+  await writeFile(join(storage, 'codegraph.db'), 'fixture');
+  await symlink(storage, join(root, '.codegraph'), process.platform === 'win32' ? 'junction' : 'dir');
+  const args = await validateIndexArguments({ indexPath: join(root, '.codegraph') });
+  assert.equal(args.projectPath, await realpath(root));
+  assert.equal(args.indexPath, join(await realpath(root), '.codegraph'));
 });
 test('non-MCP CLI output is captured and bounded without entering MCP stdout', async () => {
   await mkdir('.tmp', { recursive: true });
@@ -43,13 +60,15 @@ test('non-MCP CLI output is captured and bounded without entering MCP stdout', a
 test('affected validates deleted paths, confines them to the project and rejects malformed options', async () => {
   const root = await mkdtemp(resolve('.tmp/affected-validation-'));
   await mkdir(join(root, '.codegraph'));
-  const validated = await validateAffectedArguments({ projectPath: root, files: ['deleted.js', 'src\\module.js', '--help'], depth: 3, filter: '*.test.js', crossTier: true });
+  const indexPath = join(root, '.codegraph');
+  await writeFile(join(indexPath, 'codegraph.db'), 'fixture');
+  const validated = await validateAffectedArguments({ indexPath, files: ['deleted.js', 'src\\module.js', '--help'], depth: 3, filter: '*.test.js', crossTier: true });
   assert.deepEqual(validated.files, ['deleted.js', 'src/module.js', '--help']);
   for (const files of [[], ['../escape.js'], ['..\\escape.js'], [join(root, 'absolute.js')], [''], [42]]) {
-    await assert.rejects(validateAffectedArguments({ projectPath: root, files }), /files/);
+    await assert.rejects(validateAffectedArguments({ indexPath, files }), /files/);
   }
   for (const extra of [{ depth: 1.5 }, { depth: 0 }, { crossTier: 'true' }, { filter: '' }, { force: true }]) {
-    await assert.rejects(validateAffectedArguments({ projectPath: root, files: ['sample.js'], ...extra }));
+    await assert.rejects(validateAffectedArguments({ indexPath, files: ['sample.js'], ...extra }));
   }
 });
 

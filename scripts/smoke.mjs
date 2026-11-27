@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { resolve, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -9,6 +9,8 @@ const entry = resolve(process.argv[2] ?? 'src/cli.js');
 mkdirSync('.tmp', { recursive: true });
 const project = mkdtempSync(resolve('.tmp/synthetic-project-'));
 mkdirSync(project, { recursive: true });
+const subdir = resolve(project, 'application', 'src');
+mkdirSync(subdir, { recursive: true });
 writeFileSync(`${project}/sample.js`, 'export function greet(name) { return formatGreeting(name); }\nexport function formatGreeting(name) { return "Hello " + name; }\n');
 writeFileSync(`${project}/sample.test.js`, 'import { greet } from "./sample.js";\nexport function testGreeting() { return greet("test"); }\n');
 const git = spawnSync('git', ['init', project], { encoding: 'utf8', windowsHide: true });
@@ -40,21 +42,23 @@ try {
   assert.equal(JSON.parse(beforeInit.content[0].text).initialized, false);
   const initialized = await client.callTool({ name: 'codegraph_init', arguments: { projectPath: project } }, undefined, { timeout: 180000 });
   assert.ok(!initialized.isError, JSON.stringify(initialized));
-  const status = await client.callTool({ name: 'codegraph_status', arguments: { projectPath: project } }, undefined, { timeout: 180000 });
+  const status = await client.callTool({ name: 'codegraph_status', arguments: { projectPath: subdir } }, undefined, { timeout: 180000 });
   assert.ok(!status.isError, JSON.stringify(status));
-  const health = JSON.parse(JSON.parse(status.content[0].text).stdout);
+  const health = JSON.parse(status.content[0].text);
   assert.equal(health.initialized, true); assert.ok(health.nodeCount > 0);
-  const result = await client.callTool({ name: 'codegraph_explore', arguments: { projectPath: project, query: 'greet formatGreeting', maxFiles: 2 } }, undefined, { timeout: 180000 });
+  assert.equal(resolve(health.projectPath), project); assert.equal(resolve(health.requestedPath), subdir);
+  const indexPath = health.indexPath;
+  const result = await client.callTool({ name: 'codegraph_explore', arguments: { projectPath: subdir, query: 'greet formatGreeting', maxFiles: 2 } }, undefined, { timeout: 180000 });
   assert.ok(!result.isError, JSON.stringify(result));
   assert.ok(JSON.stringify(result).includes('greet'), JSON.stringify(result));
   assert.equal(starts(), 2);
-  const indexedViaMcp = await client.callTool({ name: 'codegraph_index', arguments: { projectPath: project } }, undefined, { timeout: 180000 });
+  const indexedViaMcp = await client.callTool({ name: 'codegraph_index', arguments: { indexPath } }, undefined, { timeout: 180000 });
   assert.ok(!indexedViaMcp.isError, JSON.stringify(indexedViaMcp));
   assert.equal(JSON.parse(indexedViaMcp.content[0].text).exitCode, 0);
   const afterIndex = await client.callTool({ name: 'codegraph_explore', arguments: { projectPath: project, query: 'greet formatGreeting', maxFiles: 2 } }, undefined, { timeout: 180000 });
   assert.ok(!afterIndex.isError && JSON.stringify(afterIndex).includes('greet'), JSON.stringify(afterIndex));
   const call = async (name, args = {}) => {
-    const response = await client.callTool({ name, arguments: { projectPath: project, ...args } }, undefined, { timeout: 180000 });
+    const response = await client.callTool({ name, arguments: { indexPath, ...args } }, undefined, { timeout: 180000 });
     assert.ok(!response.isError, JSON.stringify(response));
     return JSON.parse(response.content[0].text);
   };
@@ -70,6 +74,13 @@ try {
   assert.ok(JSON.parse(affected.stdout).affectedTests.includes('sample.test.js'), affected.stdout);
   const cycles = await call('codegraph_cycles');
   assert.equal(cycles.exitCode, 1); assert.ok(JSON.parse(cycles.stdout).count > 0);
-  console.log(JSON.stringify({ upstreamVersion: client.getServerVersion().version, tools: tools.tools.length, discoveryCacheWithoutWorker: 'passed', workerExpiry: 'passed', lazyRestart: 'passed', syntheticProjectExplore: 'passed', initViaMcp: 'passed', statusViaMcp: 'passed', indexViaMcp: 'passed', readAfterIndex: 'passed', syncViaMcp: 'passed', readAfterSync: 'passed', affectedTestsViaMcp: 'passed', cyclesWithAndWithoutFindings: 'passed' }));
+  const invalidIndex = resolve(subdir, basename(indexPath));
+  mkdirSync(invalidIndex); writeFileSync(resolve(invalidIndex, 'codegraph.db'), 'invalid database fixture');
+  const rejected = await client.callTool({ name: 'codegraph_index', arguments: { indexPath: invalidIndex } }, undefined, { timeout: 180000 });
+  assert.equal(rejected.isError, true);
+  assert.equal(readFileSync(resolve(invalidIndex, 'codegraph.db'), 'utf8'), 'invalid database fixture');
+  const unchanged = await client.callTool({ name: 'codegraph_status', arguments: { projectPath: subdir } }, undefined, { timeout: 180000 });
+  assert.equal(JSON.parse(unchanged.content[0].text).indexPath, indexPath);
+  console.log(JSON.stringify({ upstreamVersion: client.getServerVersion().version, tools: tools.tools.length, discoveryCacheWithoutWorker: 'passed', workerExpiry: 'passed', lazyRestart: 'passed', syntheticProjectExplore: 'passed', initViaMcp: 'passed', statusViaMcp: 'passed', indexViaMcp: 'passed', readAfterIndex: 'passed', syncViaMcp: 'passed', readAfterSync: 'passed', affectedTestsViaMcp: 'passed', cyclesWithAndWithoutFindings: 'passed', parentIndexDiscovery: 'passed', exactIndexSelection: 'passed' }));
 } catch (error) { console.error(logs); throw error; }
 finally { await client.close(); }

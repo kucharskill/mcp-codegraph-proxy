@@ -28,35 +28,39 @@ Names, descriptions and schemas are obtained from the actual backend's `tools/li
 Rebuild an existing index through MCP:
 
 ```js
-codegraph_index({ projectPath: "/path/to/indexed/project" })
+codegraph_index({ indexPath: "/path/to/project/.codegraph" })
 ```
 
-This explicit operation validates the exact absolute directory and requires its own `.codegraph/` directory. It waits for active reads, closes this worker's upstream readers, resolves the current official CLI and captures its `index --quiet` result. Later reads wait for the operation, then lazily reconnect. The returned tool result includes the upstream version, exit code and bounded CLI output. Errors are not retried automatically. Client response timeout does not mark the CLI as finished; disconnect stops owned CLI processes.
+This explicit operation accepts the absolute index directory returned by status, not the source directory or the `codegraph.db` file. Before executing, the proxy checks that the official CLI recognizes exactly this initialized index under the current configuration. An invalid index cannot silently select a parent. It waits for active reads, closes this worker's upstream readers, resolves the current official CLI and captures its `index --quiet` result. Later reads wait for the operation, then lazily reconnect. The returned tool result includes `projectPath`, `indexPath`, the upstream version, exit code and bounded CLI output. Errors are not retried automatically. Client response timeout does not mark the CLI as finished; disconnect stops owned CLI processes.
 
 Initialize a project or check its index through MCP:
 
 ```js
-codegraph_status({ projectPath: "/path/to/project" })
+codegraph_status({ projectPath: "/path/to/project/application/src" })
 codegraph_init({ projectPath: "/path/to/project" })
 ```
 
 `codegraph_init` explicitly runs the official `init --yes` to create `.codegraph/` and build the first index. It uses upstream defaults, including project Git sync hooks when upstream requires a fallback for file watching. It does not run the global agent/MCP installer. Existing indexes follow upstream's init behavior; use `codegraph_index` to rebuild them.
 
-`codegraph_status` runs `status --json` for the exact indexed directory. It reports index health, counts, pending changes and extraction versions in captured stdout. Without an exact `.codegraph/` directory, it returns `{projectPath, initialized:false}` without falling back to an ancestor's index. Status waits for this worker's mutations but keeps its existing backend reader open. CLI results include the upstream version, exit code, stdout, stderr and an output-truncation flag.
+`codegraph_status` delegates discovery to the official `status --json`: it finds the nearest initialized index at `projectPath` or in a parent directory. Its JSON tool content directly includes `requestedPath`, the resolved source root as `projectPath`, `indexPath`, `initialized`, index health, counts, pending changes and extraction versions. If none is found it reports `initialized:false`. Status waits for this worker's mutations but keeps its existing backend reader open. The upstream version, exit code, raw stdout, stderr and output-truncation flag are retained too.
 
-Initialization never happens automatically. The proxy does not expand a requested path to a parent repository or change global installations. A newer upstream release can require an explicit `codegraph_index` call on existing indexes. Supplementary tool calls are serialized in the worker, and mutations wait for active reads before releasing its readers. This coordination covers this worker only; independent clients and external processes retain their own ownership and upstream locks.
+Pass the returned `indexPath` to supplementary `index`, `sync`, `affected` and `cycles` calls. These operations require a concrete index and never search for an alternative. The directory's source parent is preserved even when the index directory is a junction or symlink. Custom index directory names follow upstream's `CODEGRAPH_DIR` configuration; status and execution must use the same configuration. This does not add support for an arbitrary external index directory detached from its source root.
+
+Since 0.4.0, these four supplementary tools require `indexPath` instead of `projectPath`. `init` and `status` retain `projectPath`. Native upstream tools always retain their original schemas, including any native tool that takes precedence over a supplement.
+
+Initialization never happens automatically, and `init` uses exactly the requested source directory. Status can discover a parent index without initializing it. The proxy does not change global installations. A newer upstream release can require an explicit `codegraph_index` call on existing indexes. Supplementary tool calls are serialized in the worker, and mutations wait for active reads before releasing its readers. This coordination covers this worker only; independent clients and external processes retain their own ownership and upstream locks.
 
 Update only changed files, find affected tests, or inspect circular imports:
 
 ```js
-codegraph_sync({ projectPath: "/path/to/indexed/project" })
-codegraph_affected({ projectPath: "/path/to/indexed/project", files: ["src/auth.js"], depth: 5, filter: "*.test.js", crossTier: false })
-codegraph_cycles({ projectPath: "/path/to/indexed/project" })
+codegraph_sync({ indexPath: "/path/to/project/.codegraph" })
+codegraph_affected({ indexPath: "/path/to/project/.codegraph", files: ["application/src/auth.js"], depth: 5, filter: "*.test.js", crossTier: false })
+codegraph_cycles({ indexPath: "/path/to/project/.codegraph" })
 ```
 
-`codegraph_sync` runs `sync --quiet` against an existing index and releases this worker's readers using the same coordination as a rebuild. It is an incremental update, not a full rebuild.
+`codegraph_sync` runs `sync --quiet` against the whole selected index and releases this worker's readers using the same coordination as a rebuild. It is an incremental update, not a full rebuild.
 
-`codegraph_affected` runs `affected --json` with a required nonempty list of project-relative changed files. Deleted files are accepted; paths outside the project are rejected. Optional `depth`, `filter` and `crossTier` correspond to upstream traversal depth, test-file glob and links across process boundaries. It reports affected tests without running them.
+`codegraph_affected` runs `affected --json` with a required nonempty list of changed files relative to the selected index's source root (`projectPath` returned by status), not the folder from which status was requested. Deleted files are accepted; paths outside that source root are rejected. Optional `depth`, `filter` and `crossTier` correspond to upstream traversal depth, test-file glob and links across process boundaries. It reports affected tests without running them.
 
 `codegraph_cycles` runs `cycles --json`. Upstream exit code 1 with a valid positive cycle report is returned as a successful tool result, preserving that exit code and report. Other failures remain errors. Both analysis tools keep the worker's backend reader open and use the same bounded CLI result format as status.
 
