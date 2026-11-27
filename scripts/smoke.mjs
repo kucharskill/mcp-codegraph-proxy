@@ -43,7 +43,7 @@ try {
   peer.setRequestHandler(ListRootsRequestSchema, () => ({ roots: [] }));
   try {
     await peer.connect(peerTransport, { timeout: 180000 });
-    assert.deepEqual((await peer.listTools({}, { timeout: 180000 })).tools, tools.tools);
+    assert.deepEqual(await peer.listTools({}, { timeout: 180000 }), tools);
     assert.ok(!peerLogs.includes('backend-start'), peerLogs);
   } finally { await peer.close(); }
   for (let i = 0; i < 120 && !logs.includes('idle-expired'); i++) await sleep(100);

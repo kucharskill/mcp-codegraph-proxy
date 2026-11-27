@@ -15,22 +15,28 @@ export function canonical(value) {
 export const digest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 export function invocationKey({ command, args, cwd, env }, { ignoreEnv = [], platform = process.platform } = {}) {
   const normalize = name => platform === 'win32' ? name.toUpperCase() : name;
-  const ignored = new Set(['CODEX_TOOL_CALL_ID', ...ignoreEnv].map(normalize));
-  const environment = Object.entries(env).filter(([name, value]) => value !== undefined && !ignored.has(normalize(name)) && !/^(PATH$|INIT_|NPM_)/i.test(name))
+  const ignored = new Set(ignoreEnv.map(normalize));
+  const environment = Object.entries(env).filter(([name, value]) => value !== undefined && !ignored.has(normalize(name)) && !/^(CODEX_TOOL_CALL_ID$|PATH$|INIT_|NPM_)/i.test(name))
     .map(([name, value]) => [normalize(name), String(value)]).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   return digest([command, args, cwd, environment]);
 }
 const listFields = { 'tools/list': 'tools', 'resources/list': 'resources', 'resources/templates/list': 'resourceTemplates', 'prompts/list': 'prompts' };
-function cacheableResult(method, result) {
-  if (!object(result) || Object.hasOwn(result, '_meta')) return false;
+function hasTransientIdentifier(value) {
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value).some(([key, nested]) => {
+    // Schema property names describe inputs/outputs, not live protocol identifiers.
+    if (key === 'inputSchema' || key === 'outputSchema') return false;
+    const name = key.split('/').at(-1).replace(/[-_]/g, '').toLowerCase();
+    return (['sessionid', 'mcpsessionid', 'sessiontoken', 'progresstoken', 'requestid', 'requeststate', 'taskid', 'inputresponses'].includes(name) && nested !== null && nested !== undefined) || hasTransientIdentifier(nested);
+  });
+}
+export function cacheableResult(method, result) {
+  if (!object(result) || hasTransientIdentifier(result) || (result._meta !== undefined && !object(result._meta))) return false;
   if (method === 'initialize') return legacyVersions.has(result.protocolVersion) && object(result.capabilities) && object(result.serverInfo) &&
     typeof result.serverInfo.name === 'string' && typeof result.serverInfo.version === 'string' &&
-    Object.keys(result.serverInfo).every(key => ['name', 'version', 'title', 'description', 'icons', 'websiteUrl'].includes(key)) &&
-    (result.instructions === undefined || typeof result.instructions === 'string') &&
-    Object.keys(result).every(key => ['protocolVersion', 'capabilities', 'serverInfo', 'instructions'].includes(key));
+    (result.instructions === undefined || typeof result.instructions === 'string');
   const field = listFields[method];
   if (!field || !Array.isArray(result[field]) || (result.nextCursor !== undefined && typeof result.nextCursor !== 'string')) return false;
-  if (!Object.keys(result).every(key => [field, 'nextCursor'].includes(key))) return false;
   return result[field].every(item => object(item) && typeof item.name === 'string' &&
     (method !== 'tools/list' || object(item.inputSchema)) &&
     (method !== 'resources/list' || typeof item.uri === 'string') &&

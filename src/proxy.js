@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { startChild } from './child.js';
 import { log } from './meta.js';
-import { canonical, digest, legacyVersions } from './discovery-cache.js';
+import { canonical, digest, legacyVersions, cacheableResult } from './discovery-cache.js';
 const discovery = new Set(['initialize', 'server/discover', 'tools/list', 'resources/list', 'resources/templates/list', 'prompts/list']);
 const cacheable = new Set(['tools/list', 'resources/list', 'resources/templates/list', 'prompts/list']);
 const key = value => JSON.stringify(value);
@@ -226,7 +226,7 @@ export class Proxy {
             this.sharedCache.put(context, request.cacheKey, request.method, message.result, request.cacheRevision, digest(this.backendInfo));
             persistence = this.sharedCache.flush();
           }
-          else if (!this.sharedCache && cacheable.has(request.method)) this.cache.set(request.cacheKey, { result: message.result, until: Date.now() + this.cacheMs });
+          else if (!this.sharedCache && cacheable.has(request.method) && cacheableResult(request.method, message.result)) this.cache.set(request.cacheKey, { result: message.result, until: Date.now() + this.cacheMs });
         }
         const keepAlive = discovery.has(request.method) ? this.discoveryMs : this.idleMs;
         this.expiresAt = Math.max(this.expiresAt, Date.now() + keepAlive);

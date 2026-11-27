@@ -65,6 +65,24 @@ test('one worker deadline uses max and cannot expire pending work', async () => 
     await sleep(120); assert.equal(f.p.closed, true);
   } finally { await f.p.close(); }
 });
+
+test('discovery lists and probes retain one minute while real operations retain thirty', async () => {
+  const f = fixture({ role: 'worker' });
+  try {
+    await f.init(); let id = 1;
+    for (const method of ['tools/list', 'prompts/list', 'resources/list', 'resources/templates/list', 'server/discover']) {
+      f.send({ id, method }); await f.response(id++);
+      assert.ok(f.p.expiresAt <= Date.now() + 60000, method);
+      assert.ok(f.p.expiresAt > Date.now() + 50000, method);
+    }
+    f.send({ id, method: 'tools/call', params: { name: 'fixture_echo', arguments: {} } }); await f.response(id++);
+    assert.ok(f.p.expiresAt > Date.now() + 1700000);
+    const deadline = f.p.expiresAt;
+    f.send({ id, method: 'resources/templates/list' }); await f.response(id++);
+    f.send({ id, method: 'ping' }); await f.response(id);
+    assert.equal(f.p.expiresAt, deadline);
+  } finally { await f.p.close(); }
+});
 test('cache invalidates on roots changes; late notifications never start backend', async () => {
   const f = fixture();
   try {

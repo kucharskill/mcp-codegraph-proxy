@@ -24,7 +24,7 @@ test('invocation hash includes command, args, cwd and the whole environment, exc
 
 test('PATH, INIT_* and NPM_* are ignored case-insensitively without changing other key components or input env', () => {
   const invocation = { command: 'node', args: ['serve', '--mcp'], cwd: '/project', env: { IMPORTANT: 'same' } };
-  const excluded = ['PATH', 'Path', 'pAtH', 'INIT_CWD', 'INIT_EXTRA', 'iNiT_custom', 'npm_config_local_prefix', 'npm_package_json', 'NPM_EXTRA', 'NpM_custom'];
+  const excluded = ['CODEX_TOOL_CALL_ID', 'codeX_Tool_call_iD', 'PATH', 'Path', 'pAtH', 'INIT_CWD', 'INIT_EXTRA', 'iNiT_custom', 'npm_config_local_prefix', 'npm_package_json', 'NPM_EXTRA', 'NpM_custom'];
   for (const platform of ['win32', 'linux']) {
     const expected = invocationKey(invocation, { platform });
     for (const name of excluded) {
@@ -49,6 +49,26 @@ test('disk cache has a fixed ten-minute expiry and contains only validated disco
   await c.flush();
   const text = readFileSync(c.file, 'utf8');
   for (const secret of ['not-for-cache', 'tool-result-secret', 'session-secret', 'CODEX_TOOL_CALL_ID']) assert.equal(text.includes(secret), false);
+});
+
+test('complete discovery results keep their own ten-minute validity independent of backend cache hints', async () => {
+  const c = cache();
+  const result = { ...tools, ttlMs: 0, cacheScope: 'session', resultType: 'fixture', _meta: { 'future/field': [1, false] }, futureField: { keep: 'verbatim' } };
+  c.put(context, 'tools', 'tools/list', result, c.revision(), identity); await c.flush();
+  const entry = c.get(context, 'tools', 'tools/list').entry;
+  assert.deepEqual(entry.result, result); assert.equal(entry.expiresAt - entry.createdAt, 600000);
+  await sleep(5); assert.equal(c.get(context, 'tools', 'tools/list').entry.expiresAt, entry.expiresAt);
+});
+
+test('session/progress responses are skipped whole while schema property names remain cacheable', async () => {
+  const c = cache();
+  for (const extra of [{ sessionId: 'live-session' }, { _meta: { progressToken: 'live-progress' } }, { _meta: { 'mcp/sessionId': 'live-session' } }, { extension: { requestState: 'live-state' } }]) {
+    c.put(context, 'transient', 'tools/list', { ...tools, ...extra }, c.revision(), identity); await c.flush();
+    assert.equal(c.get(context, 'transient', 'tools/list').entry, undefined);
+  }
+  const schema = { tools: [{ name: 'schema', inputSchema: { type: 'object', properties: { sessionId: { type: 'string' }, progressToken: { type: 'number' } } } }] };
+  c.put(context, 'schema', 'tools/list', schema, c.revision(), identity); await c.flush();
+  assert.deepEqual(c.get(context, 'schema', 'tools/list').entry.result, schema);
 });
 
 test('expiry, malformed or old documents and invalid metadata safely miss', async () => {
