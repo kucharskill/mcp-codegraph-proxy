@@ -99,6 +99,8 @@ Only the resulting hash is stored, not the invocation, environment, secrets or t
 
 Writes use temporary files and atomic replacement, with a short per-key writer lock to merge concurrent updates. An independent invalidation revision prevents old in-flight writers from restoring invalidated data. Tool/resource/prompt list-change notifications, roots-change notifications and detected backend identity changes invalidate cache across replicas. Expired, malformed, oversized or old-format records safely miss. Storage failures fall back to live discovery. These mechanisms coordinate metadata only; they neither merge workers nor add a daemon.
 
+For local troubleshooting, each MCP adapter startup appends one JSONL record `{pid, startedAt, env}` to `mcp-codegraph-proxy/discovery/env-startup.jsonl` under the user's temporary directory. `env` is the adapter's original `process.env`, before backend overrides or cache-key exclusions. Worker/backend starts, discovery and tool calls do not append records. This file contains raw environment values, which can include credentials: keep it local and never publish it. New directories/files request modes 0700/0600 on POSIX; Windows uses the user TEMP directory's inherited permissions. A failed append does not affect MCP startup. The file is append-only with no rotation or additional diagnostics machinery.
+
 ## Configuration
 
 | Environment variable | Default | Meaning |

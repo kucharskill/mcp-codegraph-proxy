@@ -6,6 +6,7 @@ import { metadata, milliseconds } from './meta.js';
 import { resolveLatest } from './resolve.js';
 import { projectTools } from './project-tools.js';
 import { DiscoveryCache } from './discovery-cache.js';
+import { recordStartupEnvironment } from './startup-env.js';
 export function runnerMode(env = process.env, modulePath = fileURLToPath(import.meta.url)) {
   const explicit = env.CG_PROXY_RUNNER;
   if (explicit && !['local', 'latest'].includes(explicit)) throw new Error('CG_PROXY_RUNNER must be local or latest');
@@ -16,6 +17,7 @@ export async function main(args = process.argv.slice(2)) {
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) return console.log(`Usage: ${metadata.name} [mcp | --worker | --version | --help]\n\nTransparent CodeGraph MCP over stdio. Requires Node.js 22+ and npm/npx.\nCG_PROXY_RUNNER=local|latest selects our worker. Upstream always resolves through npx.\nCG_PROXY_DIAGNOSTICS=1 enables lifecycle metadata on stderr.\nCG_PROXY_IDLE_MS defaults to 1800000; CG_PROXY_DISCOVERY_IDLE_MS to 60000.\nCG_PROXY_DISCOVERY_CACHE_MS defaults to 600000; CG_PROXY_STARTUP_MS to 180000.\nCG_PROXY_CACHE_IGNORE_ENV adds comma-separated volatile env names to the cache-key exclusions.`);
   const worker = args.length === 1 && args[0] === '--worker';
   if (args.length && !worker && !(args.length === 1 && args[0] === 'mcp')) throw new Error('Unknown arguments. Use --help.');
+  if (!worker) recordStartupEnvironment();
   const mode = runnerMode();
   const cacheMs = milliseconds('CG_PROXY_DISCOVERY_CACHE_MS', 600000);
   const backendEnv = { ...process.env, CODEGRAPH_NO_DAEMON: '1' };
