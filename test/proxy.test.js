@@ -117,3 +117,15 @@ test('ping is answered locally after backend expiry', async () => {
     assert.equal(f.starts(), 1);
   } finally { await f.p.close(); }
 });
+test('new work waits for a draining worker and is sent only to its replacement', async () => {
+  const f = fixture({ env: { ...process.env, FIXTURE_DRAIN: '1' } });
+  try {
+    await f.init(); f.send({ id: 1, method: 'tools/list' }); await f.response(1);
+    f.send({ id: 2, method: 'tools/call', params: { name: 'fixture_echo', arguments: { replacement: true } } });
+    const response = await f.response(2);
+    assert.ok(!response.error, JSON.stringify(response));
+    assert.equal(JSON.parse(response.result.content[0].text).replacement, true);
+    assert.equal(f.starts(), 2);
+    assert.equal(f.messages.some(m => m.method === 'notifications/mcp-codegraph-proxy/closing'), false);
+  } finally { await f.p.close(); }
+});

@@ -61,6 +61,7 @@ export class Proxy {
     try {
       await this.ensureStarted(message.method === 'initialize');
       if (this.closed) return;
+      this.pending.get(id).generation = this.generation;
       this.child.send(message);
     } catch (error) {
       // A disconnect callback may already have answered this request.
@@ -70,6 +71,7 @@ export class Proxy {
   }
   async ensureStarted(initializing) {
     if (this.stopping) await this.stopping;
+    if (this.draining) await this.draining;
     if (this.closed) throw new Error('Proxy is closing');
     if (this.starting) return this.starting;
     if (this.child) return;
@@ -103,6 +105,10 @@ export class Proxy {
   }
   fromBackend(message) {
     if (!message || typeof message !== 'object' || Array.isArray(message)) return;
+    if (this.role === 'adapter' && message.method === 'notifications/mcp-codegraph-proxy/closing') {
+      this.draining = this.child?.close().finally(() => { this.draining = undefined; });
+      return;
+    }
     if (message.method === 'notifications/tools/list_changed') this.invalidate();
     if (message.method && Object.hasOwn(message, 'id')) this.serverPending.add(key(message.id));
     if (!message.method && this.bootstrap && message.id === this.bootstrap.id) {
@@ -132,10 +138,15 @@ export class Proxy {
     this.backendInfo = version;
   }
   disconnected(failure) {
+    const generation = this.generation;
     this.child = undefined; this.generation = undefined;
     clearTimeout(this.timer); this.bootstrap?.reject(failure ?? new Error('Backend disconnected'));
-    for (const request of this.pending.values()) this.error(request.id, -32603, 'Backend disconnected. Operation outcome may be unknown; no automatic retry was performed.');
-    this.pending.clear(); this.serverPending.clear();
+    for (const [id, request] of this.pending) {
+      if (request.generation !== generation) continue;
+      this.error(request.id, -32603, 'Backend disconnected. Operation outcome may be unknown; no automatic retry was performed.');
+      this.pending.delete(id);
+    }
+    this.serverPending.clear();
     log({ role: this.role, event: 'backend-disconnected' });
     if (this.role === 'worker' && !this.closed) void this.close('upstream-disconnected');
   }
@@ -147,6 +158,7 @@ export class Proxy {
   }
   close(reason = 'shutdown') {
     if (this.stopping) return this.stopping;
+    if (this.role === 'worker' && reason === 'idle-expired') this.send({ jsonrpc: '2.0', method: 'notifications/mcp-codegraph-proxy/closing' });
     this.closed = true; clearTimeout(this.timer);
     log({ role: this.role, event: reason });
     this.stopping = (async () => {

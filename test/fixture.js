@@ -13,7 +13,13 @@ createInterface({ input: process.stdin }).on('line', line => {
     case 'initialize': reply({ protocolVersion: m.params.protocolVersion, serverInfo: { name: 'fixture', version }, capabilities: { tools: {} }, instructions: 'Verbatim upstream instructions.' }); break;
     case 'tools/list':
       if (m.params?.roots) { rootsRequest = m.id; console.log(JSON.stringify({ jsonrpc: '2.0', id: 'server-roots', method: 'roots/list' })); }
-      else reply({ tools: [{ name: 'fixture_echo', description: 'Echo arguments', inputSchema: { type: 'object' } }] });
+      else {
+        reply({ tools: [{ name: 'fixture_echo', description: 'Echo arguments', inputSchema: { type: 'object' } }] });
+        if (process.env.FIXTURE_DRAIN === '1') {
+          console.log(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/mcp-codegraph-proxy/closing' }));
+          setTimeout(() => process.exit(0), 200);
+        }
+      }
       break;
     case 'tools/call': {
       if (m.params.arguments?.crash) return process.exit(1);
