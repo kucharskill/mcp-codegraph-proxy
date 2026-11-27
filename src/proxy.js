@@ -47,6 +47,8 @@ export class Proxy {
     }
     const id = key(message.id);
     if (this.pending.has(id)) { this.error(message.id, -32600, 'Duplicate request ID'); return; }
+    // Transport health checks must not wake or retain an expensive executor.
+    if (message.method === 'ping') { this.send({ jsonrpc: '2.0', id: message.id, result: {} }); return; }
     const cacheKey = key([message.method, message.params ?? {}]);
     const cached = this.cache.get(cacheKey);
     if (this.role === 'adapter' && cached && Date.now() < cached.until) {

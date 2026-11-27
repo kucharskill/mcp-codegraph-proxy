@@ -43,6 +43,7 @@ Direct `node src/cli.js` uses the local worker for development. `CG_PROXY_RUNNER
 One worker owns one deadline and timer, with pending requests tracked in both directions:
 
 - Discovery metadata has five minutes of adapter-local cache. A hit does not start or retain any executor. Tool-list and roots-change notifications invalidate cache; pagination parameters are part of the cache key.
+- Standard MCP `ping` is acknowledged locally and never starts or retains an executor.
 - Discovery answered by the backend retains the worker for one minute. Other requests retain it for 30 minutes after the actual response. The deadline uses `max(previous, now + retention)`, so discovery cannot shorten a longer retention period.
 - Pending client requests and backend requests such as `roots/list` prevent idle expiry. Client timeouts and cancellation notifications do not imply backend work ended.
 - On expiry the worker closes CodeGraph and exits. The next real request starts a current worker and repeats the original initialization handshake. Ordinary notifications do not start a worker.

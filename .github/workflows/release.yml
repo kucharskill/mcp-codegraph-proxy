@@ -19,7 +19,14 @@ jobs:
         with:
           node-version: '24'
       - run: npm ci --ignore-scripts
-      - run: npm run check
+      - run: npm run release:prepare
+      - name: Packed package smoke
+        shell: bash
+        run: |
+          mkdir -p .tmp/installed .tmp/outside
+          npm install --prefix .tmp/installed --ignore-scripts "./.tmp/releases/$(node -p 'require("./.tmp/releases/archive.json").filename')"
+          cd .tmp/outside
+          node ../../scripts/smoke.mjs ../installed/node_modules/mcp-codegraph-proxy/src/cli.js
   publish:
     needs: check
     runs-on: ubuntu-latest

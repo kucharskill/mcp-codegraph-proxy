@@ -108,3 +108,12 @@ test('upstream version change invalidates catalog after lazy bootstrap', async (
     assert.ok(f.messages.some(m => m.method === 'notifications/tools/list_changed'));
   } finally { await f.p.close(); }
 });
+test('ping is answered locally after backend expiry', async () => {
+  const f = fixture();
+  try {
+    await f.init(); await f.p.child.close();
+    f.send({ id: 1, method: 'ping' });
+    assert.deepEqual((await f.response(1)).result, {});
+    assert.equal(f.starts(), 1);
+  } finally { await f.p.close(); }
+});
