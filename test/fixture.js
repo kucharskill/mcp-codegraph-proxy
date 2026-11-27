@@ -29,7 +29,7 @@ createInterface({ input: process.stdin }).on('line', line => {
       break;
     case 'tools/call': {
       if (m.params.arguments?.listChanged) console.log(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }));
-      if (m.params.name === 'fixture_env') { reply({ content: [{ type: 'text', text: JSON.stringify({ callId: process.env.CODEX_TOOL_CALL_ID }) }] }); break; }
+      if (m.params.name === 'fixture_env') { reply({ content: [{ type: 'text', text: JSON.stringify({ callId: process.env.CODEX_TOOL_CALL_ID, environment: Object.fromEntries((m.params.arguments?.envNames ?? []).map(name => [name, process.env[name]])) }) }] }); break; }
       if (m.params.arguments?.crash) return process.exit(1);
       if (m.params.arguments?.delay) setTimeout(() => reply({ content: [{ type: 'text', text: 'done' }] }), m.params.arguments.delay);
       else reply({ content: [{ type: 'text', text: JSON.stringify(m.params.arguments) }] });

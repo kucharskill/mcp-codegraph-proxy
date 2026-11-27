@@ -7,7 +7,7 @@ import { recordStartupEnvironment } from '../src/startup-env.js';
 test('startup environment is appended as separate JSONL records without modifying it', () => {
   mkdirSync('.tmp', { recursive: true });
   const directory = mkdtempSync(resolve('.tmp/startup-env-'));
-  const first = { CODEX_TOOL_CALL_ID: 'fixture-one', CODEGRAPH_NO_DAEMON: 'original-value', SYNTHETIC_TOKEN: 'fixture-value' };
+  const first = { CODEX_TOOL_CALL_ID: 'fixture-one', CODEGRAPH_NO_DAEMON: 'original-value', SYNTHETIC_TOKEN: 'fixture-value', PATH: 'fixture-path', INIT_CWD: 'fixture-init', npm_config_local_prefix: 'fixture-prefix', npm_package_json: 'fixture-package' };
   const second = { CODEX_TOOL_CALL_ID: 'fixture-two' };
   recordStartupEnvironment(directory, first); recordStartupEnvironment(directory, second);
   const file = join(directory, 'env-startup.jsonl');

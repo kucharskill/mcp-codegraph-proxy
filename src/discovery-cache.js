@@ -16,7 +16,7 @@ export const digest = value => createHash('sha256').update(JSON.stringify(canoni
 export function invocationKey({ command, args, cwd, env }, { ignoreEnv = [], platform = process.platform } = {}) {
   const normalize = name => platform === 'win32' ? name.toUpperCase() : name;
   const ignored = new Set(['CODEX_TOOL_CALL_ID', ...ignoreEnv].map(normalize));
-  const environment = Object.entries(env).filter(([name, value]) => value !== undefined && !ignored.has(normalize(name)))
+  const environment = Object.entries(env).filter(([name, value]) => value !== undefined && !ignored.has(normalize(name)) && !/^(PATH$|INIT_|NPM_)/i.test(name))
     .map(([name, value]) => [normalize(name), String(value)]).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   return digest([command, args, cwd, environment]);
 }

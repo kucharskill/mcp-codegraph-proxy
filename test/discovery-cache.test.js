@@ -22,6 +22,21 @@ test('invocation hash includes command, args, cwd and the whole environment, exc
   assert.equal(invocationKey({ ...invocation, env: { VOLATILE: 'a', A: '1' } }, { ignoreEnv: ['VOLATILE'] }), invocationKey({ ...invocation, env: { VOLATILE: 'b', A: '1' } }, { ignoreEnv: ['VOLATILE'] }));
 });
 
+test('PATH, INIT_* and NPM_* are ignored case-insensitively without changing other key components or input env', () => {
+  const invocation = { command: 'node', args: ['serve', '--mcp'], cwd: '/project', env: { IMPORTANT: 'same' } };
+  const excluded = ['PATH', 'Path', 'pAtH', 'INIT_CWD', 'INIT_EXTRA', 'iNiT_custom', 'npm_config_local_prefix', 'npm_package_json', 'NPM_EXTRA', 'NpM_custom'];
+  for (const platform of ['win32', 'linux']) {
+    const expected = invocationKey(invocation, { platform });
+    for (const name of excluded) {
+      const env = { ...invocation.env, [name]: 'first' }; const original = { ...env };
+      assert.equal(invocationKey({ ...invocation, env }, { platform }), expected, name);
+      assert.equal(invocationKey({ ...invocation, env: { ...env, [name]: 'second' } }, { platform }), expected, name);
+      assert.deepEqual(env, original);
+    }
+    for (const name of ['IMPORTANT', 'INITIALIZED', 'INIT', 'NPM', 'PATH_SUFFIX']) assert.notEqual(invocationKey({ ...invocation, env: { ...invocation.env, [name]: 'changed' } }, { platform }), expected, name);
+  }
+});
+
 test('disk cache has a fixed ten-minute expiry and contains only validated discovery metadata', async () => {
   const c = cache(); const revision = c.get(context, 'tools', 'tools/list').revision;
   c.put(context, 'tools', 'tools/list', tools, revision, identity); await c.flush();
@@ -89,6 +104,22 @@ test('a second process initializes and lists tools from shared cache without sta
     const result = await second.request('tools/call', { name: 'fixture_env', arguments: {} });
     assert.equal(JSON.parse(result.result.content[0].text).callId, 'second-id'); assert.equal(starts(o), 2);
   } finally { await second.close(); }
+});
+
+test('replicas share discovery across PATH and npm/init changes while execution receives every original value', async () => {
+  const o = options();
+  const stable = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(PATH$|INIT_|NPM_)/i.test(name)));
+  const firstEnv = { ...stable, PATH: 'fixture-first-path', INIT_CWD: 'fixture-first-init', npm_config_local_prefix: 'fixture-first-prefix', npm_package_json: 'fixture-first-json', NPM_EXTRA: 'fixture-first-extra' };
+  const changed = { pAtH: 'fixture-second-path', iNiT_CwD: 'fixture-second-init', NpM_config_local_prefix: 'fixture-second-prefix', npm_package_json: 'fixture-second-json', NpM_EXTRA: 'fixture-second-extra' };
+  const a = replica(o, firstEnv);
+  try { await a.init(); await a.request('tools/list'); } finally { await a.close(); }
+  const b = replica(o, { ...stable, ...changed });
+  try {
+    await b.init(); await b.request('tools/list'); assert.equal(starts(o), 1);
+    const result = await b.request('tools/call', { name: 'fixture_env', arguments: { envNames: Object.keys(changed) } });
+    assert.deepEqual(JSON.parse(result.result.content[0].text).environment, changed);
+    assert.equal(starts(o), 2);
+  } finally { await b.close(); }
 });
 
 test('cold ping and declared modern ping never start a backend; modern ping is not synthesized', async () => {
