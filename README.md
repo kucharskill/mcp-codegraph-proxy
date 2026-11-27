@@ -23,7 +23,28 @@ Use the original upstream tool names, schemas and arguments, including `projectP
 codegraph_explore({ projectPath: "/path/to/indexed/project", query: "AuthService login" })
 ```
 
-The available tool catalog follows upstream and any `CODEGRAPH_MCP_TOOLS` setting inherited from the process environment. The proxy does not add instance identifiers, rewrite results, initialize indexes, change global installations, install agent instructions, or migrate existing indexes. Initialize or rebuild a project explicitly with the upstream CLI when needed. A newer upstream release can require rebuilding older indexes; its own diagnostics describe compatibility.
+Names, descriptions and schemas are obtained from the actual backend's `tools/list` at runtime, without a proxy-owned list, filter or selection of native tools. Upstream controls its own defaults; any explicit `CODEGRAPH_MCP_TOOLS` setting is inherited unchanged. The proxy supplements that list with `codegraph_index`, `codegraph_init` and `codegraph_status`. If upstream exposes any of these names, its original definition and execution take precedence. Pagination is preserved; supplements are appended to the final page without duplicates. No instance identifiers are added to calls.
+
+Rebuild an existing index through MCP:
+
+```js
+codegraph_index({ projectPath: "/path/to/indexed/project" })
+```
+
+This explicit operation validates the exact absolute directory and requires its own `.codegraph/` directory. It waits for active reads, closes this worker's upstream readers, resolves the current official CLI and captures its `index --quiet` result. Later reads wait for the operation, then lazily reconnect. The returned tool result includes the upstream version, exit code and bounded CLI output. Errors are not retried automatically. Client response timeout does not mark the CLI as finished; disconnect stops owned CLI processes.
+
+Initialize a project or check its index through MCP:
+
+```js
+codegraph_status({ projectPath: "/path/to/project" })
+codegraph_init({ projectPath: "/path/to/project" })
+```
+
+`codegraph_init` explicitly runs the official `init --yes` to create `.codegraph/` and build the first index. It uses upstream defaults, including project Git sync hooks when upstream requires a fallback for file watching. It does not run the global agent/MCP installer. Existing indexes follow upstream's init behavior; use `codegraph_index` to rebuild them.
+
+`codegraph_status` runs `status --json` for the exact indexed directory. It reports index health, counts, pending changes and extraction versions in captured stdout. Without an exact `.codegraph/` directory, it returns `{projectPath, initialized:false}` without falling back to an ancestor's index. Status waits for this worker's mutations but keeps its existing backend reader open. CLI results include the upstream version, exit code, stdout, stderr and an output-truncation flag.
+
+Initialization never happens automatically. The proxy does not expand a requested path to a parent repository or change global installations. A newer upstream release can require an explicit `codegraph_index` call on existing indexes. Supplementary tool calls are serialized in the worker, and mutations wait for active reads before releasing its readers. This coordination covers this worker only; independent clients and external processes retain their own ownership and upstream locks.
 
 ## Execution and updates
 
@@ -48,7 +69,7 @@ One worker owns one deadline and timer, with pending requests tracked in both di
 - Pending client requests and backend requests such as `roots/list` prevent idle expiry. Client timeouts and cancellation notifications do not imply backend work ended.
 - On expiry the worker closes CodeGraph and exits. The next real request starts a current worker and repeats the original initialization handshake. Ordinary notifications do not start a worker.
 - On disconnect or failure, operations are never replayed automatically. Errors can indicate an unknown outcome. The adapter can lazily recover for subsequent requests.
-- Initial instructions, server identity, tool schemas, results, notifications, roots requests and extension methods pass through as MCP messages. There is no tool-specific translation. Clients may retain initial server metadata until reconnect, even if a later executor changes version.
+- Initial instructions, server identity, native tool schemas, results, notifications, roots requests and extension methods pass through as MCP messages. The catalog is augmented only with the three project tools described above when their native names are absent. Clients may retain initial server metadata until reconnect, even if a later executor changes version.
 
 CodeGraph is started with its supported `CODEGRAPH_NO_DAEMON=1` setting. This keeps execution owned by the proxy instead of starting a detached shared daemon. Existing external CodeGraph daemons are never enumerated or terminated by the proxy. Upstream may report lock conflicts when another process owns an indexed project; resolve those through CodeGraph itself. Project selection otherwise follows upstream and the client's MCP roots.
 
@@ -77,4 +98,4 @@ npm run release:prepare
 node scripts/smoke.mjs
 ```
 
-The smoke test creates and indexes only a synthetic repository under `.tmp/`, checks discovery cache after worker expiry, then calls `codegraph_explore` after lazy restart. Release archives use an explicit allowlist; local configuration, indexes, logs and temporary data are excluded. MIT licensed.
+The smoke test creates only a synthetic repository under `.tmp/`, checks discovery cache after worker expiry, queries uninitialized status, initializes through `codegraph_init`, checks indexed status, calls `codegraph_explore` after lazy restart, rebuilds through `codegraph_index` and verifies reads after reopening the index. Release archives use an explicit allowlist; local configuration, indexes, logs and temporary data are excluded. MIT licensed.

@@ -14,7 +14,11 @@ createInterface({ input: process.stdin }).on('line', line => {
     case 'tools/list':
       if (m.params?.roots) { rootsRequest = m.id; console.log(JSON.stringify({ jsonrpc: '2.0', id: 'server-roots', method: 'roots/list' })); }
       else {
-        reply({ tools: [{ name: 'fixture_echo', description: 'Echo arguments', inputSchema: { type: 'object' } }] });
+        const tools = [{ name: 'fixture_echo', description: 'Echo arguments', inputSchema: { type: 'object' } }];
+        if (process.env.FIXTURE_NATIVE_INDEX === '1') tools.push({ name: 'codegraph_index', description: 'Native index definition', inputSchema: { type: 'object' } });
+        if (process.env.FIXTURE_NATIVE_STATUS === '1') tools.push({ name: 'codegraph_status', description: 'Native status definition', inputSchema: { type: 'object' } });
+        if (process.env.FIXTURE_PAGES === '1' && !m.params?.cursor) reply({ tools: tools.slice(-1), nextCursor: 'second' });
+        else reply({ tools: process.env.FIXTURE_PAGES === '1' ? tools.slice(0, -1) : tools });
         if (process.env.FIXTURE_DRAIN === '1') {
           console.log(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/mcp-codegraph-proxy/closing' }));
           setTimeout(() => process.exit(0), 200);

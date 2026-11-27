@@ -5,12 +5,15 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { Proxy } from '../src/proxy.js';
 import { runnerMode } from '../src/cli.js';
+import { indexTool } from '../src/index-tool.js';
+import { projectTools, statusTool } from '../src/project-tools.js';
 function fixture(options = {}) {
+  const { localTool, ...proxyOptions } = options;
   let starts = 0;
   const input = new PassThrough(); const output = new PassThrough();
   const messages = [];
   output.on('data', data => { for (const line of String(data).trim().split('\n')) messages.push(JSON.parse(line)); });
-  const p = new Proxy({ role: 'adapter', target: async () => { starts++; return { args: [fileURLToPath(new URL('./fixture.js', import.meta.url))], version: '1' }; }, ...options });
+  const p = new Proxy({ role: 'adapter', target: async () => { starts++; return { args: [fileURLToPath(new URL('./fixture.js', import.meta.url))], version: '1' }; }, localTools: localTool ? [localTool] : [], ...proxyOptions });
   p.connect(input, output);
   const send = message => input.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
   const response = async id => {
@@ -127,5 +130,106 @@ test('new work waits for a draining worker and is sent only to its replacement',
     assert.equal(JSON.parse(response.result.content[0].text).replacement, true);
     assert.equal(f.starts(), 2);
     assert.equal(f.messages.some(m => m.method === 'notifications/mcp-codegraph-proxy/closing'), false);
+  } finally { await f.p.close(); }
+});
+test('worker augments the native catalog without replacing its tools', async () => {
+  const f = fixture({ role: 'worker', localTool: { definition: indexTool, validate: async x => x, execute: async () => ({ content: [] }) } });
+  try {
+    await f.init(); f.send({ id: 1, method: 'tools/list' });
+    const tools = (await f.response(1)).result.tools;
+    assert.deepEqual(tools.map(x => x.name), ['fixture_echo', 'codegraph_index']);
+    assert.equal(tools[0].description, 'Echo arguments');
+  } finally { await f.p.close(); }
+});
+test('index waits for running reads and queues later reads, then restarts upstream', async () => {
+  let executed = 0;
+  const f = fixture({ role: 'worker', idleMs: 0, localTool: { definition: indexTool, validate: async x => x, execute: async () => { executed++; await sleep(70); return { content: [{ type: 'text', text: 'indexed' }] }; } } });
+  try {
+    await f.init();
+    f.send({ id: 1, method: 'tools/call', params: { name: 'fixture_echo', arguments: { delay: 100 } } });
+    await sleep(15);
+    f.send({ id: 2, method: 'tools/call', params: { name: 'codegraph_index', arguments: { projectPath: '/fixture' } } });
+    f.send({ id: 3, method: 'tools/call', params: { name: 'fixture_echo', arguments: { after: true } } });
+    await sleep(30); assert.equal(executed, 0);
+    assert.ok((await f.response(1)).result);
+    assert.equal((await f.response(2)).result.content[0].text, 'indexed');
+    assert.equal(JSON.parse((await f.response(3)).result.content[0].text).after, true);
+    assert.equal(f.starts(), 2);
+  } finally { await f.p.close(); }
+});
+test('invalid index request preserves the existing reader; failure is a tool result', async () => {
+  const f = fixture({ role: 'worker', localTool: { definition: indexTool, validate: async () => { throw new Error('invalid path'); }, execute: async () => { throw new Error('must not run'); } } });
+  try {
+    await f.init(); f.send({ id: 1, method: 'tools/call', params: { name: 'codegraph_index', arguments: {} } });
+    assert.equal((await f.response(1)).result.isError, true);
+    assert.equal(f.starts(), 1); assert.ok(f.p.child);
+  } finally { await f.p.close(); }
+});
+test('worker expires after a local index even with upstream readers detached', async () => {
+  const f = fixture({ role: 'worker', idleMs: 30, discoveryMs: 30, localTool: { definition: indexTool, validate: async x => x, execute: async () => ({ content: [] }) } });
+  try {
+    await f.init(); f.send({ id: 1, method: 'tools/call', params: { name: 'codegraph_index', arguments: {} } });
+    await f.response(1); assert.equal(f.p.child, undefined);
+    await sleep(90); assert.equal(f.p.closed, true);
+  } finally { await f.p.close(); }
+});
+test('an upstream tool with the same name is kept and executed natively', async () => {
+  let localCalls = 0;
+  const f = fixture({ role: 'worker', env: { ...process.env, FIXTURE_NATIVE_INDEX: '1' }, localTool: { definition: indexTool, validate: async x => x, execute: async () => { localCalls++; return { content: [] }; } } });
+  try {
+    await f.init(); f.send({ id: 1, method: 'tools/list' });
+    const tools = (await f.response(1)).result.tools;
+    assert.equal(tools.filter(x => x.name === 'codegraph_index').length, 1);
+    assert.equal(tools.find(x => x.name === 'codegraph_index').description, 'Native index definition');
+    f.send({ id: 2, method: 'tools/call', params: { name: 'codegraph_index', arguments: { native: true } } });
+    assert.equal(JSON.parse((await f.response(2)).result.content[0].text).native, true);
+    assert.equal(localCalls, 0);
+  } finally { await f.p.close(); }
+});
+test('disconnect aborts owned local execution and waits for it to settle', async () => {
+  let running = false, aborted = false;
+  const f = fixture({ role: 'worker', localTool: { definition: indexTool, validate: async x => x, execute: async (_args, { signal }) => {
+    running = true;
+    await new Promise((_resolve, reject) => signal.addEventListener('abort', () => { aborted = true; reject(new Error('stopped')); }, { once: true }));
+  } } });
+  await f.init(); f.send({ id: 1, method: 'tools/call', params: { name: 'codegraph_index', arguments: {} } });
+  for (let i = 0; i < 100 && !running; i++) await sleep(10);
+  assert.equal(running, true); assert.equal(f.p.pending.size, 1);
+  await f.p.close(); assert.equal(aborted, true);
+});
+
+test('multiple supplements preserve a paginated native catalog and status collision', async () => {
+  const f = fixture({ role: 'worker', env: { ...process.env, FIXTURE_NATIVE_STATUS: '1', FIXTURE_PAGES: '1' }, localTools: projectTools });
+  try {
+    await f.init(); f.send({ id: 1, method: 'tools/list' });
+    const first = (await f.response(1)).result;
+    assert.equal(first.nextCursor, 'second');
+    assert.deepEqual(first.tools.map(x => x.name), ['codegraph_status']);
+    f.send({ id: 2, method: 'tools/list', params: { cursor: first.nextCursor } });
+    const second = (await f.response(2)).result;
+    assert.deepEqual(second.tools.map(x => x.name), ['fixture_echo', 'codegraph_index', 'codegraph_init']);
+    f.send({ id: 3, method: 'tools/call', params: { name: 'codegraph_status', arguments: { native: true } } });
+    assert.equal(JSON.parse((await f.response(3)).result.content[0].text).native, true);
+  } finally { await f.p.close(); }
+});
+
+test('local status preserves the active backend reader', async () => {
+  const f = fixture({ role: 'worker', localTools: [{ definition: statusTool, validate: async x => x, execute: async () => ({ content: [] }), exclusive: false }] });
+  try {
+    await f.init(); const child = f.p.child;
+    f.send({ id: 1, method: 'tools/call', params: { name: 'codegraph_status', arguments: {} } });
+    assert.ok((await f.response(1)).result);
+    assert.equal(f.p.child, child); assert.equal(f.starts(), 1);
+  } finally { await f.p.close(); }
+});
+
+test('a worker using a cached client catalog still discovers native name collisions', async () => {
+  const f = fixture({ role: 'worker', env: { ...process.env, FIXTURE_NATIVE_STATUS: '1', FIXTURE_PAGES: '1' }, localTools: projectTools });
+  try {
+    await f.init();
+    // A fresh worker can receive a call without tools/list from the adapter cache.
+    f.send({ id: 1, method: 'tools/call', params: { name: 'codegraph_status', arguments: { native: true } } });
+    assert.equal(JSON.parse((await f.response(1)).result.content[0].text).native, true);
+    assert.equal(f.messages.some(m => String(m.id).startsWith('catalog-')), false);
   } finally { await f.p.close(); }
 });

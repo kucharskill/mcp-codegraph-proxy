@@ -8,10 +8,12 @@ const key = value => JSON.stringify(value);
 
 /** One pending-request ledger, one deadline, one timer. Only workers expire. */
 export class Proxy {
-  constructor({ target, role, env = process.env, cwd = process.cwd(), idleMs = 1800000, discoveryMs = 60000, cacheMs = 300000, startupMs = 180000, exit = () => {}, spawn = startChild }) {
-    Object.assign(this, { target, role, env, cwd, idleMs, discoveryMs, cacheMs, startupMs, exit, spawn });
+  constructor({ target, role, localTools = [], env = process.env, cwd = process.cwd(), idleMs = 1800000, discoveryMs = 60000, cacheMs = 300000, startupMs = 180000, exit = () => {}, spawn = startChild }) {
+    Object.assign(this, { target, role, localTools, env, cwd, idleMs, discoveryMs, cacheMs, startupMs, exit, spawn });
+    this.nativeTools = new Set();
     this.pending = new Map(); this.serverPending = new Set(); this.cache = new Map();
     this.expiresAt = 0; this.closed = false;
+    this.drainWaiters = new Set();
   }
   connect(input, output) {
     this.output = output;
@@ -27,7 +29,7 @@ export class Proxy {
   }
   send(message) { if (!this.closed && !this.output.destroyed) this.output.write(JSON.stringify(message) + '\n'); }
   error(id, code, message) { this.send({ jsonrpc: '2.0', id, error: { code, message } }); }
-  invalidate() { this.cache.clear(); }
+  invalidate() { this.cache.clear(); this.catalogKnown = false; }
   async receive(message) {
     if (!message || typeof message !== 'object' || Array.isArray(message) || message.jsonrpc !== '2.0') {
       this.error(null, -32600, 'Invalid request'); return;
@@ -36,7 +38,7 @@ export class Proxy {
     const hasId = Object.hasOwn(message, 'id');
     if (!message.method) {
       this.serverPending.delete(key(message.id));
-      this.child?.send(message); this.arm(); return;
+      this.child?.send(message); this.notifyDrained(); this.arm(); return;
     }
     if (!hasId) {
       if (message.method === 'notifications/initialized') this.initialized = message;
@@ -56,20 +58,26 @@ export class Proxy {
       this.send({ jsonrpc: '2.0', id: message.id, result: cached.result }); return;
     }
     clearTimeout(this.timer);
-    this.pending.set(id, { id: message.id, method: message.method, cacheKey });
+    this.pending.set(id, { id: message.id, method: message.method, cacheKey, cursor: message.params?.cursor });
     if (message.method === 'initialize') this.initialize = message;
+    const localTool = this.localTools.find(tool => tool.definition.name === message.params?.name);
+    if (this.role === 'worker' && localTool && message.method === 'tools/call') return this.callLocal(localTool, message, id);
     try {
-      await this.ensureStarted(message.method === 'initialize');
+      do {
+        await this.maintenance?.catch(() => {});
+        await this.ensureStarted(message.method === 'initialize');
+      } while (this.maintenance && this.role === 'worker');
       if (this.closed) return;
       this.pending.get(id).generation = this.generation;
       this.child.send(message);
     } catch (error) {
       // A disconnect callback may already have answered this request.
       if (this.pending.delete(id)) this.error(message.id, -32603, error.message);
-      this.arm();
+      this.notifyDrained(); this.arm();
     }
   }
   async ensureStarted(initializing) {
+    if (this.closed) throw new Error('Proxy is closing');
     if (this.stopping) await this.stopping;
     if (this.draining) await this.draining;
     if (this.closed) throw new Error('Proxy is closing');
@@ -78,7 +86,7 @@ export class Proxy {
     if (!this.starting) this.starting = (async () => {
       const resolved = await this.target();
       if (this.closed) throw new Error('Proxy is closing');
-      const generation = Symbol(); this.generation = generation;
+      const generation = Symbol(); this.generation = generation; this.catalogKnown = false;
       const child = await this.spawn(resolved.args, {
         cwd: this.cwd, env: this.env,
         onmessage: message => { if (this.generation === generation) this.fromBackend(message); },
@@ -103,6 +111,19 @@ export class Proxy {
     })().finally(() => { this.starting = undefined; this.arm(); });
     return this.starting;
   }
+  async ensureCatalog() {
+    if (this.catalogKnown) return;
+    if (this.catalogLoading) return this.catalogLoading;
+    let timer;
+    this.catalogLoading = new Promise((resolve, reject) => {
+      const id = `catalog-${randomUUID()}`;
+      this.catalogRequest = { id, resolve, reject };
+      this.nativeTools.clear();
+      timer = setTimeout(() => reject(new Error('Backend tool discovery timed out')), this.startupMs);
+      this.child.send({ jsonrpc: '2.0', id, method: 'tools/list' });
+    }).finally(() => { clearTimeout(timer); this.catalogRequest = undefined; this.catalogLoading = undefined; });
+    return this.catalogLoading;
+  }
   fromBackend(message) {
     if (!message || typeof message !== 'object' || Array.isArray(message)) return;
     if (this.role === 'adapter' && message.method === 'notifications/mcp-codegraph-proxy/closing') {
@@ -111,6 +132,15 @@ export class Proxy {
     }
     if (message.method === 'notifications/tools/list_changed') this.invalidate();
     if (message.method && Object.hasOwn(message, 'id')) this.serverPending.add(key(message.id));
+    if (!message.method && this.catalogRequest && message.id === this.catalogRequest.id) {
+      if (message.error || !Array.isArray(message.result?.tools)) this.catalogRequest.reject(new Error(message.error?.message ?? 'Invalid upstream tool catalog'));
+      else {
+        for (const tool of message.result.tools) this.nativeTools.add(tool.name);
+        if (message.result.nextCursor) this.child.send({ jsonrpc: '2.0', id: message.id, method: 'tools/list', params: { cursor: message.result.nextCursor } });
+        else { this.catalogKnown = true; this.catalogRequest.resolve(); }
+      }
+      return;
+    }
     if (!message.method && this.bootstrap && message.id === this.bootstrap.id) {
       if (message.error) this.bootstrap.reject(new Error(message.error.message));
       else { this.observeInitialization(message.result); this.bootstrap.resolve(); }
@@ -120,7 +150,16 @@ export class Proxy {
       const request = this.pending.get(key(message.id));
       this.pending.delete(key(message.id));
       if (request) {
+        request.complete?.();
         if (request.method === 'initialize' && message.result) this.observeInitialization(message.result);
+        if (this.role === 'worker' && request.method === 'tools/list' && message.result?.tools) {
+          if (!request.cursor) this.nativeTools.clear();
+          for (const tool of message.result.tools) this.nativeTools.add(tool.name);
+          if (!message.result.nextCursor) {
+            this.catalogKnown = true;
+            message.result.tools = [...message.result.tools, ...this.localTools.filter(tool => !this.nativeTools.has(tool.definition.name)).map(tool => tool.definition)];
+          }
+        }
         if (this.role === 'adapter' && cacheable.has(request.method) && message.result && !message.error) {
           this.cache.set(request.cacheKey, { result: message.result, until: Date.now() + this.cacheMs });
         }
@@ -128,7 +167,7 @@ export class Proxy {
         this.expiresAt = Math.max(this.expiresAt, Date.now() + keepAlive);
       }
     }
-    this.send(message); this.arm();
+    this.send(message); this.notifyDrained(); this.arm();
   }
   observeInitialization(result) {
     const version = key(result?.serverInfo ?? {});
@@ -141,28 +180,78 @@ export class Proxy {
     const generation = this.generation;
     this.child = undefined; this.generation = undefined;
     clearTimeout(this.timer); this.bootstrap?.reject(failure ?? new Error('Backend disconnected'));
+    this.catalogRequest?.reject(failure ?? new Error('Backend disconnected'));
     for (const [id, request] of this.pending) {
       if (request.generation !== generation) continue;
       this.error(request.id, -32603, 'Backend disconnected. Operation outcome may be unknown; no automatic retry was performed.');
+      request.complete?.();
       this.pending.delete(id);
     }
     this.serverPending.clear();
+    this.notifyDrained();
     log({ role: this.role, event: 'backend-disconnected' });
     if (this.role === 'worker' && !this.closed) void this.close('upstream-disconnected');
   }
   arm() {
     clearTimeout(this.timer);
-    if (this.role !== 'worker' || !this.idleMs || this.closed || this.starting || this.stopping || !this.child || this.pending.size || this.serverPending.size) return;
+    if (this.role !== 'worker' || !this.idleMs || this.closed || this.starting || this.stopping || !this.expiresAt || this.pending.size || this.serverPending.size) return;
     const delay = Math.max(0, this.expiresAt - Date.now());
     this.timer = setTimeout(() => { void this.close('idle-expired'); }, delay);
+  }
+  notifyDrained() {
+    if (!this.closed && (this.serverPending.size || [...this.pending.values()].some(request => request.generation))) return;
+    for (const resolve of this.drainWaiters) resolve();
+    this.drainWaiters.clear();
+  }
+  async callLocal(tool, message, id) {
+    const previous = this.maintenance;
+    const operation = (async () => {
+      await previous?.catch(() => {});
+      await this.ensureStarted(false);
+      await this.ensureCatalog();
+      if (this.closed) throw new Error('Worker is closing');
+      if (this.nativeTools.has(tool.definition.name)) {
+        await new Promise(resolve => {
+          const request = this.pending.get(id);
+          request.complete = resolve; request.generation = this.generation;
+          this.child.send(message);
+        });
+        return;
+      }
+      const args = await tool.validate(message.params.arguments ?? {});
+      await this.starting?.catch(() => {});
+      if ([...this.pending.values()].some(request => request.generation) || this.serverPending.size) await new Promise(resolve => this.drainWaiters.add(resolve));
+      if (this.closed) throw new Error('Worker is closing');
+      // Mutations detach drained readers so their normal exit does not stop this worker.
+      if (tool.exclusive !== false) {
+        const child = this.child; this.child = undefined; this.generation = undefined;
+        await child?.close();
+      }
+      if (this.closed) throw new Error('Worker is closing');
+      this.localController = new AbortController();
+      return tool.execute(args, { signal: this.localController.signal, env: this.env });
+    })();
+    this.maintenance = operation;
+    try { const result = await operation; if (result !== undefined) this.send({ jsonrpc: '2.0', id: message.id, result }); }
+    catch (error) { this.send({ jsonrpc: '2.0', id: message.id, result: { isError: true, content: [{ type: 'text', text: error.message }] } }); }
+    finally {
+      if (this.maintenance === operation) { this.maintenance = undefined; this.localController = undefined; }
+      this.pending.delete(id);
+      this.expiresAt = Math.max(this.expiresAt, Date.now() + this.idleMs);
+      this.notifyDrained(); this.arm();
+    }
   }
   close(reason = 'shutdown') {
     if (this.stopping) return this.stopping;
     if (this.role === 'worker' && reason === 'idle-expired') this.send({ jsonrpc: '2.0', method: 'notifications/mcp-codegraph-proxy/closing' });
     this.closed = true; clearTimeout(this.timer);
+    this.catalogRequest?.reject(new Error('Proxy is closing'));
+    for (const request of this.pending.values()) request.complete?.();
+    this.localController?.abort(); this.notifyDrained();
     log({ role: this.role, event: reason });
     this.stopping = (async () => {
       await this.child?.close();
+      await this.maintenance?.catch(() => {});
       await this.starting?.catch(() => {});
       await this.child?.close();
       this.exit();

@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { Proxy } from './proxy.js';
 import { metadata, milliseconds } from './meta.js';
 import { resolveLatest } from './resolve.js';
+import { projectTools } from './project-tools.js';
 export function runnerMode(env = process.env, modulePath = fileURLToPath(import.meta.url)) {
   const explicit = env.CG_PROXY_RUNNER;
   if (explicit && !['local', 'latest'].includes(explicit)) throw new Error('CG_PROXY_RUNNER must be local or latest');
@@ -24,6 +25,7 @@ export async function main(args = process.argv.slice(2)) {
   };
   const proxy = new Proxy({
     role: worker ? 'worker' : 'adapter', target,
+    localTools: worker ? projectTools : [],
     env: worker ? { ...process.env, CODEGRAPH_NO_DAEMON: '1' } : process.env,
     idleMs: milliseconds('CG_PROXY_IDLE_MS', 1800000),
     discoveryMs: milliseconds('CG_PROXY_DISCOVERY_IDLE_MS', 60000),
