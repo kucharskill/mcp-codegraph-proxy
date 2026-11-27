@@ -5,6 +5,7 @@ import { Proxy } from './proxy.js';
 import { metadata, milliseconds } from './meta.js';
 import { resolveLatest } from './resolve.js';
 import { projectTools } from './project-tools.js';
+import { DiscoveryCache } from './discovery-cache.js';
 export function runnerMode(env = process.env, modulePath = fileURLToPath(import.meta.url)) {
   const explicit = env.CG_PROXY_RUNNER;
   if (explicit && !['local', 'latest'].includes(explicit)) throw new Error('CG_PROXY_RUNNER must be local or latest');
@@ -12,10 +13,16 @@ export function runnerMode(env = process.env, modulePath = fileURLToPath(import.
 }
 export async function main(args = process.argv.slice(2)) {
   if (args.length === 1 && ['--version', '-v'].includes(args[0])) return console.log(metadata.version);
-  if (args.length === 1 && ['--help', '-h'].includes(args[0])) return console.log(`Usage: ${metadata.name} [mcp | --worker | --version | --help]\n\nTransparent CodeGraph MCP over stdio. Requires Node.js 22+ and npm/npx.\nCG_PROXY_RUNNER=local|latest selects our worker. Upstream always resolves through npx.\nCG_PROXY_DIAGNOSTICS=1 enables lifecycle metadata on stderr.\nCG_PROXY_IDLE_MS defaults to 1800000; CG_PROXY_DISCOVERY_IDLE_MS to 60000.\nCG_PROXY_DISCOVERY_CACHE_MS defaults to 300000; CG_PROXY_STARTUP_MS to 180000.`);
+  if (args.length === 1 && ['--help', '-h'].includes(args[0])) return console.log(`Usage: ${metadata.name} [mcp | --worker | --version | --help]\n\nTransparent CodeGraph MCP over stdio. Requires Node.js 22+ and npm/npx.\nCG_PROXY_RUNNER=local|latest selects our worker. Upstream always resolves through npx.\nCG_PROXY_DIAGNOSTICS=1 enables lifecycle metadata on stderr.\nCG_PROXY_IDLE_MS defaults to 1800000; CG_PROXY_DISCOVERY_IDLE_MS to 60000.\nCG_PROXY_DISCOVERY_CACHE_MS defaults to 600000; CG_PROXY_STARTUP_MS to 180000.\nCG_PROXY_CACHE_IGNORE_ENV adds comma-separated volatile env names to the cache-key exclusions.`);
   const worker = args.length === 1 && args[0] === '--worker';
   if (args.length && !worker && !(args.length === 1 && args[0] === 'mcp')) throw new Error('Unknown arguments. Use --help.');
   const mode = runnerMode();
+  const cacheMs = milliseconds('CG_PROXY_DISCOVERY_CACHE_MS', 600000);
+  const backendEnv = { ...process.env, CODEGRAPH_NO_DAEMON: '1' };
+  const sharedCache = worker || !cacheMs ? undefined : new DiscoveryCache({
+    invocation: { command: 'npx', args: ['-y', '--prefer-online', '@colbymchenry/codegraph@latest', 'serve', '--mcp'], cwd: process.cwd(), env: backendEnv },
+    ignoreEnv: (process.env.CG_PROXY_CACHE_IGNORE_ENV ?? '').split(',').map(name => name.trim()).filter(Boolean), ttl: cacheMs,
+  });
   const target = worker ? async () => {
     const resolved = await resolveLatest('@colbymchenry/codegraph');
     return { args: [resolved.entry, 'serve', '--mcp'], version: resolved.version };
@@ -24,12 +31,12 @@ export async function main(args = process.argv.slice(2)) {
     return { args: [resolved.entry, '--worker'], version: resolved.version };
   };
   const proxy = new Proxy({
-    role: worker ? 'worker' : 'adapter', target,
+    role: worker ? 'worker' : 'adapter', target, sharedCache,
     localTools: worker ? projectTools : [],
-    env: worker ? { ...process.env, CODEGRAPH_NO_DAEMON: '1' } : process.env,
+    env: worker ? backendEnv : process.env,
     idleMs: milliseconds('CG_PROXY_IDLE_MS', 1800000),
     discoveryMs: milliseconds('CG_PROXY_DISCOVERY_IDLE_MS', 60000),
-    cacheMs: milliseconds('CG_PROXY_DISCOVERY_CACHE_MS', 300000),
+    cacheMs,
     startupMs: milliseconds('CG_PROXY_STARTUP_MS', 180000),
     exit: () => process.exit(0),
   });

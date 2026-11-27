@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 const entry = resolve(process.argv[2] ?? 'src/cli.js');
@@ -15,10 +16,12 @@ writeFileSync(`${project}/sample.js`, 'export function greet(name) { return form
 writeFileSync(`${project}/sample.test.js`, 'import { greet } from "./sample.js";\nexport function testGreeting() { return greet("test"); }\n');
 const git = spawnSync('git', ['init', project], { encoding: 'utf8', windowsHide: true });
 assert.equal(git.status, 0, git.stderr);
-const transport = new StdioClientTransport({ command: process.execPath, args: [entry], env: {
+const env = {
   ...process.env, CG_PROXY_RUNNER: process.env.CG_PROXY_RUNNER ?? 'local', CODEGRAPH_TELEMETRY: '0',
-  CG_PROXY_DIAGNOSTICS: '1', CG_PROXY_DISCOVERY_IDLE_MS: '600', CG_PROXY_IDLE_MS: '600', CG_PROXY_DISCOVERY_CACHE_MS: '30000',
-}, stderr: 'pipe' });
+  CG_PROXY_SMOKE_RUN: randomUUID(),
+  CG_PROXY_DIAGNOSTICS: '1', CG_PROXY_DISCOVERY_IDLE_MS: '2000', CG_PROXY_IDLE_MS: '2000', CG_PROXY_DISCOVERY_CACHE_MS: '30000',
+};
+const transport = new StdioClientTransport({ command: process.execPath, args: [entry], env, stderr: 'pipe' });
 let logs = ''; transport.stderr.on('data', data => { logs += data; });
 const client = new Client({ name: 'codegraph-smoke', version: '1' }, { capabilities: { roots: {} } });
 const { ListRootsRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
@@ -34,6 +37,15 @@ try {
   for (const name of ['codegraph_sync', 'codegraph_affected', 'codegraph_cycles']) assert.equal(tools.tools.filter(x => x.name === name).length, 1);
   assert.ok(client.getInstructions()?.length);
   assert.equal(starts(), 1);
+  const peerTransport = new StdioClientTransport({ command: process.execPath, args: [entry], env, stderr: 'pipe' });
+  let peerLogs = ''; peerTransport.stderr.on('data', data => { peerLogs += data; });
+  const peer = new Client({ name: 'codegraph-smoke', version: '1' }, { capabilities: { roots: {} } });
+  peer.setRequestHandler(ListRootsRequestSchema, () => ({ roots: [] }));
+  try {
+    await peer.connect(peerTransport, { timeout: 180000 });
+    assert.deepEqual((await peer.listTools({}, { timeout: 180000 })).tools, tools.tools);
+    assert.ok(!peerLogs.includes('backend-start'), peerLogs);
+  } finally { await peer.close(); }
   for (let i = 0; i < 120 && !logs.includes('idle-expired'); i++) await sleep(100);
   assert.ok(logs.includes('idle-expired'));
   await sleep(400);
@@ -81,6 +93,6 @@ try {
   assert.equal(readFileSync(resolve(invalidIndex, 'codegraph.db'), 'utf8'), 'invalid database fixture');
   const unchanged = await client.callTool({ name: 'codegraph_status', arguments: { projectPath: subdir } }, undefined, { timeout: 180000 });
   assert.equal(JSON.parse(unchanged.content[0].text).indexPath, indexPath);
-  console.log(JSON.stringify({ upstreamVersion: client.getServerVersion().version, tools: tools.tools.length, discoveryCacheWithoutWorker: 'passed', workerExpiry: 'passed', lazyRestart: 'passed', syntheticProjectExplore: 'passed', initViaMcp: 'passed', statusViaMcp: 'passed', indexViaMcp: 'passed', readAfterIndex: 'passed', syncViaMcp: 'passed', readAfterSync: 'passed', affectedTestsViaMcp: 'passed', cyclesWithAndWithoutFindings: 'passed', parentIndexDiscovery: 'passed', exactIndexSelection: 'passed' }));
+  console.log(JSON.stringify({ upstreamVersion: client.getServerVersion().version, tools: tools.tools.length, warmReplicaWithoutWorker: 'passed', discoveryCacheWithoutWorker: 'passed', workerExpiry: 'passed', lazyRestart: 'passed', syntheticProjectExplore: 'passed', initViaMcp: 'passed', statusViaMcp: 'passed', indexViaMcp: 'passed', readAfterIndex: 'passed', syncViaMcp: 'passed', readAfterSync: 'passed', affectedTestsViaMcp: 'passed', cyclesWithAndWithoutFindings: 'passed', parentIndexDiscovery: 'passed', exactIndexSelection: 'passed' }));
 } catch (error) { console.error(logs); throw error; }
 finally { await client.close(); }

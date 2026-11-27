@@ -68,7 +68,7 @@ codegraph_cycles({ indexPath: "/path/to/project/.codegraph" })
 
 ```text
 MCP client
-  -> stable stdio adapter with discovery cache
+  -> stable stdio adapter with shared TEMP discovery cache
      -> current proxy worker
         -> current official CodeGraph MCP
 ```
@@ -81,8 +81,8 @@ Direct `node src/cli.js` uses the local worker for development. `CG_PROXY_RUNNER
 
 One worker owns one deadline and timer, with pending requests tracked in both directions:
 
-- Discovery metadata has five minutes of adapter-local cache. A hit does not start or retain any executor. Tool-list and roots-change notifications invalidate cache; pagination parameters are part of the cache key.
-- Standard MCP `ping` is acknowledged locally and never starts or retains an executor.
+- Legacy initialization and discovery lists have ten minutes of shared disk cache under the user's temporary directory, in `mcp-codegraph-proxy/discovery`. A current entry can answer `initialize` and `tools/list` in another adapter process without starting a worker, upstream backend or npx. Cache hits do not refresh expiry or retain an executor.
+- Legacy MCP `ping` receives a local empty success response and never starts or retains an executor. A ping declared as modern MCP, or following `server/discover`, receives a method-not-found response: modern MCP removed this RPC. The wrapper does not synthesize modern protocol support or capabilities.
 - Discovery answered by the backend retains the worker for one minute. Other requests retain it for 30 minutes after the actual response. The deadline uses `max(previous, now + retention)`, so discovery cannot shorten a longer retention period.
 - Pending client requests and backend requests such as `roots/list` prevent idle expiry. Client timeouts and cancellation notifications do not imply backend work ended.
 - On expiry the worker closes CodeGraph and exits. The next real request starts a current worker and repeats the original initialization handshake. Ordinary notifications do not start a worker.
@@ -93,6 +93,12 @@ CodeGraph is started with its supported `CODEGRAPH_NO_DAEMON=1` setting. This ke
 
 Windows uses gated child startup and parent-owned kill-on-close Job Objects. Graceful stdin shutdown is attempted first, with a bounded force-close fallback. Only owned trees are targeted. Normal shutdown on POSIX forwards EOF and terminates the owned process group if necessary; hard-crash behavior also depends on upstream's parent watchdog. No broad process-name killing is used.
 
+The shared cache filename uses a fixed SHA-256 of the logical upstream command, ordered argument array, working directory and complete backend environment sorted by variable name. It does not contain a time bucket, executor cache path or adapter identifier. `CODEX_TOOL_CALL_ID` is excluded from this hash; `CG_PROXY_CACHE_IGNORE_ENV` adds comma-separated exclusions. Environment names are case-insensitive on Windows. Exclusions affect only hashing: the original environment still reaches execution, with the existing `CODEGRAPH_NO_DAEMON=1` policy.
+
+Only the resulting hash is stored, not the invocation, environment, secrets or tool-call results. Validated initialization, instructions, capabilities and catalog descriptions/schemas are cached. Handshake requests are partitioned by a hash of their parameters, so a different protocol or capability set cannot reuse an incompatible response. Top-level session metadata is not persisted. Catalogs also use a hash of the client's roots snapshot when applicable; the adapter can ask a roots-capable client for that snapshot after initialization without starting a backend. The roots themselves are not written to cache. Initialization that requires client roots before its response is obtained live instead. A later executor protocol change requires a reconnect rather than silently changing the negotiated protocol.
+
+Writes use temporary files and atomic replacement, with a short per-key writer lock to merge concurrent updates. An independent invalidation revision prevents old in-flight writers from restoring invalidated data. Tool/resource/prompt list-change notifications, roots-change notifications and detected backend identity changes invalidate cache across replicas. Expired, malformed, oversized or old-format records safely miss. Storage failures fall back to live discovery. These mechanisms coordinate metadata only; they neither merge workers nor add a daemon.
+
 ## Configuration
 
 | Environment variable | Default | Meaning |
@@ -100,7 +106,8 @@ Windows uses gated child startup and parent-owned kill-on-close Job Objects. Gra
 | `CG_PROXY_RUNNER` | automatic | `local` or `latest` worker |
 | `CG_PROXY_IDLE_MS` | `1800000` | Retention after real work; 0 disables idle expiry |
 | `CG_PROXY_DISCOVERY_IDLE_MS` | `60000` | Retention after backend discovery |
-| `CG_PROXY_DISCOVERY_CACHE_MS` | `300000` | Adapter discovery cache lifetime; 0 disables cache |
+| `CG_PROXY_DISCOVERY_CACHE_MS` | `600000` | Shared discovery cache lifetime from a successful write; 0 disables cache |
+| `CG_PROXY_CACHE_IGNORE_ENV` | empty | Additional comma-separated env names excluded from the invocation hash; execution env is preserved |
 | `CG_PROXY_STARTUP_MS` | `180000` | Registry resolution and bootstrap timeout |
 | `CG_PROXY_DIAGNOSTICS` | off | Set `1` for lifecycle metadata on stderr |
 
@@ -117,3 +124,5 @@ node scripts/smoke.mjs
 ```
 
 The smoke test creates only a synthetic repository under `.tmp/`, checks discovery cache after worker expiry, queries uninitialized status, initializes through `codegraph_init`, checks indexed status, calls `codegraph_explore` after lazy restart, rebuilds through `codegraph_index` and verifies reads after reopening the index. It also syncs new symbols and circular imports, verifies reads after sync, finds an affected test and checks cycle reports both with and without findings. Release archives use an explicit allowlist; local configuration, indexes, logs and temporary data are excluded. MIT licensed.
+
+Fixture tests cover cold and warm discovery in separate Node processes, invocation hashing and environment forwarding, fixed expiry, invalid records, concurrent metadata writes, catalog updates across live replicas, backend identity and protocol changes, roots isolation, ping and cache hits during worker idle expiry. Fixture caches and test files stay under `.tmp/`; production shared discovery uses the user's TEMP directory.
