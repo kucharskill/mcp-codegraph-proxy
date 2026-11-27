@@ -1,0 +1,29 @@
+name: Checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22', '24']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run release:prepare
+      - name: Packed package smoke
+        shell: bash
+        run: |
+          mkdir -p .tmp/installed .tmp/outside
+          npm install --prefix .tmp/installed --ignore-scripts "./.tmp/releases/$(node -p 'require("./.tmp/releases/archive.json").filename')"
+          cd .tmp/outside
+          node ../../scripts/smoke.mjs ../installed/node_modules/mcp-codegraph-proxy/src/cli.js
