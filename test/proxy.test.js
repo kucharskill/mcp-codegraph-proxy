@@ -207,7 +207,7 @@ test('multiple supplements preserve a paginated native catalog and status collis
     assert.deepEqual(first.tools.map(x => x.name), ['codegraph_status']);
     f.send({ id: 2, method: 'tools/list', params: { cursor: first.nextCursor } });
     const second = (await f.response(2)).result;
-    assert.deepEqual(second.tools.map(x => x.name), ['fixture_echo', 'codegraph_index', 'codegraph_init']);
+    assert.deepEqual(second.tools.map(x => x.name), ['fixture_echo', 'codegraph_index', 'codegraph_init', 'codegraph_sync', 'codegraph_affected', 'codegraph_cycles']);
     f.send({ id: 3, method: 'tools/call', params: { name: 'codegraph_status', arguments: { native: true } } });
     assert.equal(JSON.parse((await f.response(3)).result.content[0].text).native, true);
   } finally { await f.p.close(); }

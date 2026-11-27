@@ -26,13 +26,13 @@ export async function validateProjectArguments(args) {
 export async function rebuildIndex(args, { signal, env = process.env } = {}) {
   return executeProjectCommand(args, ['index', '--quiet'], { signal, env });
 }
-export async function executeProjectCommand(args, command, { signal, env = process.env } = {}) {
+export async function executeProjectCommand(args, command, { signal, env = process.env, positionalPath = true, isSuccessful = result => result.exitCode === 0 } = {}) {
   signal?.throwIfAborted();
   const resolved = await resolveLatest('@colbymchenry/codegraph');
   signal?.throwIfAborted();
-  const result = await runCommand([resolved.entry, ...command, args.projectPath], { signal, env, cwd: args.projectPath });
+  const result = await runCommand([resolved.entry, ...command, ...(positionalPath ? [args.projectPath] : [])], { signal, env, cwd: args.projectPath });
   return {
-    isError: result.exitCode !== 0,
+    isError: !isSuccessful(result),
     content: [{ type: 'text', text: JSON.stringify({ projectPath: args.projectPath, upstreamVersion: resolved.version, ...result }) }],
   };
 }

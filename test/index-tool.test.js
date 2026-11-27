@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile, realpath } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { validateIndexArguments } from '../src/index-tool.js';
 import { runCommand } from '../src/run-command.js';
-import { projectTools, readStatus } from '../src/project-tools.js';
+import { projectTools, readStatus, validateAffectedArguments, cycleCommandSucceeded } from '../src/project-tools.js';
 
 test('index tool requires an exact indexed absolute directory', async () => {
   await mkdir('.tmp', { recursive: true });
@@ -38,4 +38,29 @@ test('non-MCP CLI output is captured and bounded without entering MCP stdout', a
   const result = await runCommand([fixture]);
   assert.equal(result.exitCode, 7); assert.equal(result.outputTruncated, true);
   assert.ok(result.stdout.length <= 65536); assert.match(result.stderr, /stderr marker/);
+});
+
+test('affected validates deleted paths, confines them to the project and rejects malformed options', async () => {
+  const root = await mkdtemp(resolve('.tmp/affected-validation-'));
+  await mkdir(join(root, '.codegraph'));
+  const validated = await validateAffectedArguments({ projectPath: root, files: ['deleted.js', 'src\\module.js', '--help'], depth: 3, filter: '*.test.js', crossTier: true });
+  assert.deepEqual(validated.files, ['deleted.js', 'src/module.js', '--help']);
+  for (const files of [[], ['../escape.js'], ['..\\escape.js'], [join(root, 'absolute.js')], [''], [42]]) {
+    await assert.rejects(validateAffectedArguments({ projectPath: root, files }), /files/);
+  }
+  for (const extra of [{ depth: 1.5 }, { depth: 0 }, { crossTier: 'true' }, { filter: '' }, { force: true }]) {
+    await assert.rejects(validateAffectedArguments({ projectPath: root, files: ['sample.js'], ...extra }));
+  }
+});
+
+test('cycles distinguishes findings from command failure', () => {
+  assert.equal(cycleCommandSucceeded({ exitCode: 0, stdout: '{"count":0,"cycles":[]}' }), true);
+  assert.equal(cycleCommandSucceeded({ exitCode: 1, stdout: '{"count":1,"cycles":[["a.js","b.js"]]}' }), true);
+  for (const result of [
+    { exitCode: 1, stdout: 'failed to open index' },
+    { exitCode: 1, stdout: '{"count":0,"cycles":[]}' },
+    { exitCode: 1, stdout: '{"count":2,"cycles":[]}' },
+    { exitCode: 2, stdout: '{"count":1,"cycles":[["a.js","b.js"]]}' },
+    { exitCode: 1, stdout: '{"count":1,"cycles":[["a.js","b.js"]]}', outputTruncated: true },
+  ]) assert.equal(cycleCommandSucceeded(result), false);
 });
